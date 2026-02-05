@@ -3,7 +3,7 @@ import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
 import logger from './utils/logger.js';
-import db from './models/index.js'; // This imports the 'pool' from your model
+import db from './models/index.js';
 
 // Route Imports
 import accountRoutes from './routes/account.routes.js';
@@ -11,13 +11,16 @@ import clientRoutes from './routes/client.routes.js';
 import inventoryRoutes from './routes/inventory.routes.js';
 import transactionRoutes from './routes/transactions.routes.js';
 import analyticsRoutes from './routes/analytics.routes.js'
-// import bcrypt from "bcrypt";
-// const salt = await bcrypt.genSalt(10);
-// const hash = await bcrypt.hash('kdpogi0620', salt);
 
-// console.log(`Hashed password for testing: ${hash}`);
 const app = express();
 const PORT = process.env.PORT || 3030;
+
+// ==========================================
+// 1. Critical for Heroku (Trust Proxy)
+// ==========================================
+// Heroku runs your app behind a load balancer/reverse proxy.
+// Without this, req.ip will always be the internal load balancer IP.
+app.set('trust proxy', 1);
 
 // ==========================================
 // Middleware
@@ -25,26 +28,40 @@ const PORT = process.env.PORT || 3030;
 
 app.use(helmet());
 
+// Update CORS to be safer in production if possible
 app.use(cors({
+  // Tip: In the future, replace "*" with your actual frontend URL (e.g., process.env.FRONTEND_URL)
   origin: "*",
   methods: ["GET", "POST", "PUT", "DELETE"],
-  allowedHeaders: ["Content-Type", "Authorization", "clientid"]
+  // Ensure 'client_id' matches what you send from Frontend (Client-ID vs clientid)
+  allowedHeaders: ["Content-Type", "Authorization", "client_id", "clientid"]
 }));
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// app.use((req, res, next) => {
-//   logger.http(`${req.method} ${req.url} - IP: ${req.ip}`);
-//   next();
-// });
+// Optional: Request Logger (Good for debugging production issues)
+app.use((req, res, next) => {
+  const isDebug = process.env.DEBUG_MODE === 'true';
+  if (isDebug && req.url !== '/') {
+    // Plain console log is safest and simplest
+    console.log(`${req.method} ${req.url} - IP: ${req.ip}`);
 
+    // OR if you prefer to keep using your logger file:
+    // logger.info(`${req.method} ${req.url} - IP: ${req.ip}`);
+  }
+  next();
+});
 // ==========================================
 // Routes
 // ==========================================
 
 app.get("/", (req, res) => {
-  res.json({ message: "Inventory Management API (ESM) is live." });
+  res.json({
+    message: "Inventory Management API is live.",
+    env: process.env.NODE_ENV || "development",
+    timestamp: new Date().toISOString()
+  });
 });
 
 app.use('/api/account', accountRoutes);
@@ -52,6 +69,7 @@ app.use('/api/client', clientRoutes);
 app.use('/api/inventory', inventoryRoutes);
 app.use('/api/transactions', transactionRoutes);
 app.use('/api/analytics', analyticsRoutes);
+
 // ==========================================
 // Error Handling
 // ==========================================
@@ -72,8 +90,7 @@ app.use((err, req, res, next) => {
 
 const startServer = async () => {
   try {
-    // 🔍 HERE IS THE CHECK YOU WANTED
-    // We explicitly ask for a connection from the pool to ensure DB is alive.
+    // 🔍 Database Connection Check
     const connection = await db.getConnection();
 
     logger.info("✅ Database Connection Verified (Server.js)");
@@ -81,14 +98,16 @@ const startServer = async () => {
 
     // Only start listening if DB is connected
     app.listen(PORT, () => {
-      logger.info(`🚀 Server running on http://localhost:${PORT}`);
+      logger.info(`🚀 Server running on port ${PORT}`);
       logger.info(`Environment: ${process.env.NODE_ENV || 'development'}`);
     });
 
   } catch (err) {
     logger.error("❌ Failed to connect to Database. Server shutting down.");
     logger.error(`Error: ${err.message}`);
-    process.exit(1); // Kill the process so it can be restarted cleanly
+
+    // Exit with failure code so Heroku knows to restart the dyno
+    process.exit(1);
   }
 };
 
