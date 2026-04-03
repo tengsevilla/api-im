@@ -20,7 +20,7 @@ const PORT = process.env.PORT || 3030;
 // ==========================================
 // Heroku runs your app behind a load balancer/reverse proxy.
 // Without this, req.ip will always be the internal load balancer IP.
-app.set('trust proxy', 1);
+app.set('trust proxy', 1); // ✅ Works for both Heroku and Railway
 
 // ==========================================
 // Middleware
@@ -31,7 +31,7 @@ app.use(helmet());
 // Update CORS to be safer in production if possible
 app.use(cors({
   // Tip: In the future, replace "*" with your actual frontend URL (e.g., process.env.FRONTEND_URL)
-  origin: "*",
+  origin: process.env.CORS_ORIGIN || "*",
   methods: ["GET", "POST", "PUT", "DELETE"],
   // Ensure 'client_id' matches what you send from Frontend (Client-ID vs clientid)
   allowedHeaders: ["Content-Type", "Authorization", "client_id", "clientid"]

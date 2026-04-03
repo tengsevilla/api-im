@@ -109,7 +109,7 @@ export const getItemActivity = async (req, res) => {
     const clientId = getClientId(req);
 
     // ✅ FIX: Map 'itemId' (frontend query param) to 'id' (expected by model)
-    const { id } = req.query;
+    const id = req.query.id || req.query.itemId;
 
     if (!id) {
         return sendResponse(res, 400, null, "Item ID is required");
