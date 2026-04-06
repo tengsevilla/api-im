@@ -102,6 +102,29 @@ const startServer = async () => {
       logger.info(`Environment: ${process.env.NODE_ENV || 'development'}`);
     });
 
+    // ==========================================
+    // Graceful Shutdown (Railway SIGTERM)
+    // ==========================================
+    const gracefulShutdown = (signal) => {
+      logger.info(`Received ${signal}. Shutting down gracefully...`);
+
+      server.close(() => {
+        logger.info('HTTP server closed.');
+        db.end(); // ✅ Close your MySQL/DB pool cleanly
+        logger.info('DB pool closed. Exiting.');
+        process.exit(0);
+      });
+
+      // Force exit if shutdown takes too long
+      setTimeout(() => {
+        logger.error('Forced shutdown after timeout.');
+        process.exit(1);
+      }, 10000);
+    };
+
+    process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+    process.on('SIGINT',  () => gracefulShutdown('SIGINT'));
+
   } catch (err) {
     logger.error("❌ Failed to connect to Database. Server shutting down.");
     logger.error(`Error: ${err.message}`);
