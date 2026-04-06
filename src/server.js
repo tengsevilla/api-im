@@ -90,32 +90,27 @@ app.use((err, req, res, next) => {
 
 const startServer = async () => {
   try {
-    // 🔍 Database Connection Check
     const connection = await db.getConnection();
-
     logger.info("✅ Database Connection Verified (Server.js)");
-    connection.release(); // Important: Release it back immediately!
+    connection.release();
 
-    // Only start listening if DB is connected
-    app.listen(PORT, () => {
+    // ✅ server declared here
+    const server = app.listen(PORT, () => {
       logger.info(`🚀 Server running on port ${PORT}`);
       logger.info(`Environment: ${process.env.NODE_ENV || 'development'}`);
     });
 
-    // ==========================================
-    // Graceful Shutdown (Railway SIGTERM)
-    // ==========================================
+    // ✅ gracefulShutdown INSIDE startServer, so server is in scope
     const gracefulShutdown = (signal) => {
       logger.info(`Received ${signal}. Shutting down gracefully...`);
 
       server.close(() => {
         logger.info('HTTP server closed.');
-        db.end(); // ✅ Close your MySQL/DB pool cleanly
+        db.end();
         logger.info('DB pool closed. Exiting.');
         process.exit(0);
       });
 
-      // Force exit if shutdown takes too long
       setTimeout(() => {
         logger.error('Forced shutdown after timeout.');
         process.exit(1);
@@ -123,13 +118,11 @@ const startServer = async () => {
     };
 
     process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
-    process.on('SIGINT',  () => gracefulShutdown('SIGINT'));
+    process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
   } catch (err) {
     logger.error("❌ Failed to connect to Database. Server shutting down.");
     logger.error(`Error: ${err.message}`);
-
-    // Exit with failure code so Heroku knows to restart the dyno
     process.exit(1);
   }
 };
