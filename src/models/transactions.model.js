@@ -185,6 +185,7 @@ Transactions.findById = async (transactionId, clientId) => {
             items: rows.map(row => ({
                 id: row.id,
                 itemName: row.itemName || "Unknown Item", // Handle deleted items
+                itemType: row.itemType || "Unknown Type",
                 qty: row.qty,
                 price: row.unitPrice || 0,
                 subtotal: row.totalPrice
