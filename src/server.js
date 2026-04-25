@@ -2,6 +2,8 @@ import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
+import morgan from 'morgan';
+import rateLimit from 'express-rate-limit';
 import logger from './utils/logger.js';
 import db from './models/index.js';
 
@@ -10,58 +12,112 @@ import accountRoutes from './routes/account.routes.js';
 import clientRoutes from './routes/client.routes.js';
 import inventoryRoutes from './routes/inventory.routes.js';
 import transactionRoutes from './routes/transactions.routes.js';
-import analyticsRoutes from './routes/analytics.routes.js'
+import analyticsRoutes from './routes/analytics.routes.js';
 
 const app = express();
 const PORT = process.env.PORT || 3030;
 
 // ==========================================
-// 1. Critical for Heroku (Trust Proxy)
+// 1. TRUST PROXY (Required for Heroku/Railway)
 // ==========================================
-// Heroku runs your app behind a load balancer/reverse proxy.
-// Without this, req.ip will always be the internal load balancer IP.
-app.set('trust proxy', 1); // ✅ Works for both Heroku and Railway
+app.set('trust proxy', 1);
 
 // ==========================================
-// Middleware
+// 2. SECURITY HEADERS
 // ==========================================
+if (process.env.NODE_ENV === 'production') {
+  app.use(helmet());
+}
 
-app.use(helmet());
+// ==========================================
+// 3. CORS (Before everything else)
+// ==========================================
+if (process.env.NODE_ENV === 'production' && !process.env.CORS_ORIGIN) {
+  logger.warn('⚠️  WARNING: CORS_ORIGIN is not set in production!');
+}
 
-// Update CORS to be safer in production if possible
-app.use(cors({
-  // Tip: In the future, replace "*" with your actual frontend URL (e.g., process.env.FRONTEND_URL)
-  origin: process.env.CORS_ORIGIN || "*",
-  methods: ["GET", "POST", "PUT", "DELETE"],
-  // Ensure 'client_id' matches what you send from Frontend (Client-ID vs clientid)
-  allowedHeaders: ["Content-Type", "Authorization", "client_id", "clientid"]
-}));
+const corsOptions = {
+  origin: (origin, callback) => {
+    const allowed = process.env.CORS_ORIGIN?.split(',') || [];
 
+    // Allow requests with no origin (mobile apps, Postman, server-to-server)
+    if (!origin) return callback(null, true);
+
+    // Allow all in dev
+    if (process.env.NODE_ENV !== 'production') return callback(null, true);
+
+    if (allowed.includes(origin) || allowed.includes('*')) {
+      return callback(null, true);
+    }
+
+    return callback(new Error('Not allowed by CORS'));
+  },
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'client_id', 'clientid'],
+  credentials: true,
+};
+
+// Express 5 compatible preflight handler
+app.options('/{*path}', cors(corsOptions));
+app.use(cors(corsOptions));
+
+// ==========================================
+// 4. BODY PARSING
+// ==========================================
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Optional: Request Logger (Good for debugging production issues)
-app.use((req, res, next) => {
-  const isDebug = process.env.DEBUG_MODE === 'true';
-  if (isDebug && req.url !== '/') {
-    // Plain console log is safest and simplest
-    console.log(`${req.method} ${req.url} - IP: ${req.ip}`);
+// ==========================================
+// 5. LOGGING
+// ==========================================
+app.use(morgan(process.env.NODE_ENV !== 'production' ? 'dev' : 'combined'));
 
-    // OR if you prefer to keep using your logger file:
-    // logger.info(`${req.method} ${req.url} - IP: ${req.ip}`);
-  }
-  next();
+// ==========================================
+// 6. RATE LIMITING
+// ==========================================
+const limiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: process.env.NODE_ENV === 'production' ? 300 : 1000,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many requests, please try again later.' },
 });
+
+app.use('/api/', limiter);
+
 // ==========================================
-// Routes
+// 7. ROUTES
 // ==========================================
 
-app.get("/", (req, res) => {
+// Root
+app.get('/', (_req, res) => {
   res.json({
-    message: "Inventory Management API is live.",
-    env: process.env.NODE_ENV || "development",
-    timestamp: new Date().toISOString()
+    message: 'Inventory Management API is live.',
+    env: process.env.NODE_ENV || 'development',
+    timestamp: new Date().toISOString(),
   });
+});
+
+// Health Check
+app.get('/health', async (_req, res) => {
+  const isInternal = process.env.NODE_ENV !== 'production';
+  try {
+    const connection = await db.getConnection();
+    connection.release();
+    res.json({
+      status: 'healthy',
+      db: 'connected',
+      uptime: isInternal ? process.uptime() : undefined,
+      timestamp: new Date().toISOString(),
+      env: isInternal ? process.env.NODE_ENV : undefined,
+    });
+  } catch (err) {
+    res.status(503).json({
+      status: 'unhealthy',
+      db: 'disconnected',
+      error: isInternal ? err.message : undefined,
+    });
+  }
 });
 
 app.use('/api/account', accountRoutes);
@@ -71,43 +127,39 @@ app.use('/api/transactions', transactionRoutes);
 app.use('/api/analytics', analyticsRoutes);
 
 // ==========================================
-// Error Handling
+// 8. ERROR HANDLERS
 // ==========================================
 
-app.use((req, res) => {
-  logger.warn(`404 Not Found: ${req.originalUrl}`);
-  res.status(404).json({ error: 'Route not found' });
+// 404 - No path argument needed, just place it last (Express 4 & 5 compatible)
+app.use((_req, res) => {
+  res.status(404).json({ error: 'Not Found', message: 'Invalid API endpoint' });
 });
 
-app.use((err, req, res, next) => {
+// Global error handler
+app.use((err, _req, res, _next) => {
   logger.error(`Global Error: ${err.stack}`);
   res.status(500).json({ error: 'Internal Server Error' });
 });
 
 // ==========================================
-// Server Start (With DB Check)
+// 9. SERVER STARTUP & GRACEFUL SHUTDOWN
 // ==========================================
-
 const startServer = async () => {
   try {
+    logger.info('⏳ Validating Database Connection...');
     const connection = await db.getConnection();
-    logger.info("✅ Database Connection Verified (Server.js)");
+    logger.info('✅ Database Connection Verified');
     connection.release();
 
-    // ✅ server declared here
     const server = app.listen(PORT, () => {
-      logger.info(`🚀 Server running on port ${PORT}`);
-      logger.info(`Environment: ${process.env.NODE_ENV || 'development'}`);
+      logger.info(`🚀 Server running on port ${PORT} in ${process.env.NODE_ENV || 'development'} mode`);
     });
 
-    // ✅ gracefulShutdown INSIDE startServer, so server is in scope
     const gracefulShutdown = (signal) => {
-      logger.info(`Received ${signal}. Shutting down gracefully...`);
-
-      server.close(() => {
-        logger.info('HTTP server closed.');
-        db.end();
-        logger.info('DB pool closed. Exiting.');
+      logger.info(`${signal} received. Shutting down gracefully...`);
+      server.close(async () => {
+        await db.end();
+        logger.info('✅ Process terminated.');
         process.exit(0);
       });
 
@@ -121,10 +173,21 @@ const startServer = async () => {
     process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
   } catch (err) {
-    logger.error("❌ Failed to connect to Database. Server shutting down.");
-    logger.error(`Error: ${err.message}`);
+    logger.error('❌ CRITICAL: Failed to start server:', err.message);
     process.exit(1);
   }
 };
+
+// ==========================================
+// 10. GLOBAL CRASH HANDLERS
+// ==========================================
+process.on('unhandledRejection', (reason, promise) => {
+  logger.error('🔥 Unhandled Rejection at:', promise, 'reason:', reason);
+});
+
+process.on('uncaughtException', (err) => {
+  logger.error(`🔥 Uncaught Exception: ${err.message}`);
+  process.exit(1);
+});
 
 startServer();
