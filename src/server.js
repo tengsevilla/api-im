@@ -30,7 +30,12 @@ if (process.env.NODE_ENV === 'production') {
 }
 
 // ==========================================
-// 3. CORS (Before everything else)
+// 3. LOGGING (Before CORS so OPTIONS requests appear in logs)
+// ==========================================
+app.use(morgan(process.env.NODE_ENV !== 'production' ? 'dev' : 'combined'));
+
+// ==========================================
+// 4. CORS (Before everything else)
 // ==========================================
 if (process.env.NODE_ENV === 'production' && !process.env.CORS_ORIGIN) {
   logger.warn('⚠️  WARNING: CORS_ORIGIN is not set in production!');
@@ -62,15 +67,10 @@ app.options('/{*path}', cors(corsOptions));
 app.use(cors(corsOptions));
 
 // ==========================================
-// 4. BODY PARSING
+// 5. BODY PARSING
 // ==========================================
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
-
-// ==========================================
-// 5. LOGGING
-// ==========================================
-app.use(morgan(process.env.NODE_ENV !== 'production' ? 'dev' : 'combined'));
 
 // ==========================================
 // 6. RATE LIMITING
