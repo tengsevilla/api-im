@@ -37,28 +37,10 @@ app.use(morgan(process.env.NODE_ENV !== 'production' ? 'dev' : 'combined'));
 // ==========================================
 // 4. CORS (Before everything else)
 // ==========================================
-if (process.env.NODE_ENV === 'production' && !process.env.CORS_ORIGIN) {
-  logger.warn('⚠️  WARNING: CORS_ORIGIN is not set in production!');
-}
-
 const corsOptions = {
-  origin: (origin, callback) => {
-    const allowed = process.env.CORS_ORIGIN?.split(',') || [];
-
-    // Allow requests with no origin (mobile apps, Postman, server-to-server)
-    if (!origin) return callback(null, true);
-
-    // Allow all in dev
-    if (process.env.NODE_ENV !== 'production') return callback(null, true);
-
-    if (allowed.includes(origin) || allowed.includes('*')) {
-      return callback(null, true);
-    }
-
-    return callback(new Error('Not allowed by CORS'));
-  },
+  origin: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'client_id', 'clientid'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'client_id', 'clientid', 'Clientid'],
   credentials: true,
 };
 
