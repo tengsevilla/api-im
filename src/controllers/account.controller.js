@@ -34,6 +34,7 @@ export const login = async (req, res) => {
 
         // Dynamic Expiration Logic
         const tokenLife = rememberMe ? '14d' : '18h';
+        const expiresInSeconds = rememberMe ? 14 * 24 * 60 * 60 : 18 * 60 * 60;
 
         // Sign the token with 'clientId' (Primary Key)
         const accessToken = jwt.sign(
@@ -48,7 +49,7 @@ export const login = async (req, res) => {
             status: 200,
             data: user,
             access_token: accessToken,
-            expires_in: tokenLife
+            expires_in: expiresInSeconds
         });
 
     } catch (error) {
