@@ -24,6 +24,33 @@ export const createBatch = async (req, res) => {
   if (!['sale', 'restock'].includes(payload.event)) {
     return sendResponse(res, 400, null, "Invalid event type. Must be 'sale' or 'restock'");
   }
+  if (typeof payload.customerName !== 'string') {
+    return sendResponse(res, 400, null, "customerName must be a string");
+  }
+  if (!payload.date) {
+    return sendResponse(res, 400, null, "date is required");
+  }
+  for (const [index, item] of payload.items.entries()) {
+    // Coerce first: the UI sends DECIMAL columns (e.g. price) as strings
+    const id = Number(item.id);
+    const qty = Number(item.qty);
+    const price = Number(item.price);
+
+    if (!Number.isInteger(id) || id <= 0) {
+      return sendResponse(res, 400, null, `items[${index}].id must be a positive integer`);
+    }
+    if (!Number.isInteger(qty) || qty < 1) {
+      return sendResponse(res, 400, null, `items[${index}].qty must be an integer of at least 1`);
+    }
+    if (!Number.isFinite(price) || price < 0) {
+      return sendResponse(res, 400, null, `items[${index}].price must be a finite number of at least 0`);
+    }
+
+    // Pass the coerced values along so the model works with clean numbers
+    item.id = id;
+    item.qty = qty;
+    item.price = price;
+  }
 
   logger.debug(`Controller: Processing batch [${payload.event}] for client: ${clientId}`);
 
@@ -96,7 +123,7 @@ export const remove = async (req, res) => {
     sendResponse(res, 200, null, "Transaction deleted successfully");
   } catch (err) {
     logger.error(`Controller: remove Error - ${err.message}`);
-    sendResponse(res, 500, null, "Internal server error");
+    sendResponse(res, err.status || 500, null, err.message || "Internal server error");
   }
 };
 
@@ -115,6 +142,6 @@ export const removeItem = async (req, res) => {
     sendResponse(res, 200, null, "Item log deleted successfully");
   } catch (err) {
     logger.error(`Controller: removeItem Error - ${err.message}`);
-    sendResponse(res, 500, null, "Internal server error");
+    sendResponse(res, err.status || 500, null, err.message || "Internal server error");
   }
 };

@@ -17,6 +17,11 @@ const Transactions = function (data) {
 Transactions.processBatchTransaction = async (payload, clientId) => {
     let connection;
     try {
+        // ✅ Idempotency: accept an optional client-supplied refId
+        if (payload.refId !== undefined && !/^[A-Za-z0-9-]{8,64}$/.test(payload.refId)) {
+            throw { message: "Invalid refId format. Expected 8-64 alphanumeric/dash characters.", status: 400 };
+        }
+
         connection = await sql.getConnection();
         await connection.beginTransaction();
 
@@ -33,7 +38,7 @@ Transactions.processBatchTransaction = async (payload, clientId) => {
         const dateStr = dateObj.toISOString().slice(0, 10).replace(/-/g, "");
 
         // 2. Time: HHMMSS (UTC)
-        // Note: Using UTC ensures consistency across servers. 
+        // Note: Using UTC ensures consistency across servers.
         const timeStr = dateObj.toISOString().slice(11, 19).replace(/:/g, "");
 
         // 3. Random: 8 Alphanumeric Characters
@@ -41,26 +46,67 @@ Transactions.processBatchTransaction = async (payload, clientId) => {
         const random8 = Math.random().toString(36).substring(2, 10).toUpperCase().padEnd(8, 'X');
 
         // Final Format: 20260203-090633-A1B2C3D4
-        const refId = `${dateStr}-${timeStr}-${random8}`;
+        // Client-supplied refId wins (idempotency); server-generated is the backward-compat fallback
+        const refId = payload.refId || `${dateStr}-${timeStr}-${random8}`;
+
+        // ✅ Idempotency guard: FIRST statement inside the transaction.
+        // A duplicate refId hits the PK; a rolled-back batch frees the key so retries work.
+        try {
+            await connection.query(
+                "INSERT INTO transaction_batches (refId, clientId) VALUES (?, ?)",
+                [refId, clientId]
+            );
+        } catch (insertErr) {
+            if (insertErr.code === 'ER_DUP_ENTRY') {
+                await connection.rollback();
+                logger.debug(`Model: Duplicate batch refId ${refId} — skipping`);
+                return {
+                    status: 200,
+                    message: "Transaction already processed",
+                    data: { refId, duplicate: true }
+                };
+            }
+            throw insertErr;
+        }
+
+        // Sort by id ascending so concurrent batches lock rows in the same order (deadlock avoidance)
+        const items = [...payload.items].sort((a, b) => a.id - b.id);
 
         // Iterate through items
-        for (const item of payload.items) {
+        for (const item of items) {
 
             // --- STEP A: Update Stock ---
-            const updateQuery = `
-                UPDATE inventory 
-                SET qty = qty ${operator} ? 
-                WHERE id = ? AND clientId = ?
-            `;
+            // Sales must not oversell: the qty >= ? guard makes the decrement conditional
+            const updateQuery = isRestock
+                ? `UPDATE inventory
+                   SET qty = qty + ?
+                   WHERE id = ? AND clientId = ?`
+                : `UPDATE inventory
+                   SET qty = qty - ?
+                   WHERE id = ? AND clientId = ? AND qty >= ?`;
 
-            const [updateRes] = await connection.query(updateQuery, [
-                item.qty,
-                item.id,
-                clientId
-            ]);
+            const updateParams = isRestock
+                ? [item.qty, item.id, clientId]
+                : [item.qty, item.id, clientId, item.qty];
+
+            const [updateRes] = await connection.query(updateQuery, updateParams);
 
             if (updateRes.affectedRows === 0) {
-                throw new Error(`Item ID ${item.id} not found or access denied.`);
+                if (isRestock) {
+                    throw { message: `Item ID ${item.id} not found or access denied.`, status: 400 };
+                }
+                // Distinguish "missing item" from "insufficient stock"
+                const [checkRows] = await connection.query(
+                    "SELECT itemName, qty FROM inventory WHERE id = ? AND clientId = ?",
+                    [item.id, clientId]
+                );
+                if (checkRows.length === 0) {
+                    throw { message: `Item ID ${item.id} not found or access denied.`, status: 400 };
+                }
+                throw {
+                    message: `Insufficient stock for "${checkRows[0].itemName}". Available: ${checkRows[0].qty}, requested: ${item.qty}.`,
+                    status: 400
+                };
             }
 
             // --- STEP B: Log Transaction ---
@@ -100,7 +146,7 @@ Transactions.processBatchTransaction = async (payload, clientId) => {
         if (connection) await connection.rollback();
 
         logger.error(`Model Error (processBatchTransaction): ${err.message}`);
-        const status = err.message.includes("not found") ? 400 : 500;
+        const status = err.status || (err.message.includes("not found") ? 400 : 500);
         throw { message: err.message, status: status };
     } finally {
         if (connection) connection.release();
@@ -200,18 +246,64 @@ Transactions.findById = async (transactionId, clientId) => {
     }
 };
 
-// Delete: Transaction Group
+// Delete: Transaction Group (And Reverses Inventory Impact)
 Transactions.deleteById = async (transactionId, clientId) => {
+    let connection;
     try {
-        const [res] = await sql.query("DELETE FROM transactions WHERE transactionId = ? AND clientId = ?", [transactionId, clientId]);
+        connection = await sql.getConnection();
+        await connection.beginTransaction();
 
-        if (res.affectedRows === 0) {
+        // 1. Fetch all rows of the group first (to know what to undo), locking them
+        const [rows] = await connection.query(
+            "SELECT itemId, qty, action FROM transactions WHERE transactionId = ? AND clientId = ? FOR UPDATE",
+            [transactionId, clientId]
+        );
+
+        if (rows.length === 0) {
+            await connection.rollback();
             return { message: "Transaction not found or access denied", status: 200, affectedRows: 0 };
         }
-        return { affectedRows: res.affectedRows, status: 200 };
+
+        // 2. Reverse inventory impact per row
+        // 'out' (Sale) → ADD stock back (+); 'in' (Restock) → REMOVE stock (-), guarded
+        for (const row of rows) {
+            if (row.action === 'out') {
+                await connection.query(
+                    "UPDATE inventory SET qty = qty + ? WHERE id = ? AND clientId = ?",
+                    [row.qty, row.itemId, clientId]
+                );
+            } else {
+                const [updRes] = await connection.query(
+                    "UPDATE inventory SET qty = qty - ? WHERE id = ? AND clientId = ? AND qty >= ?",
+                    [row.qty, row.itemId, clientId, row.qty]
+                );
+                if (updRes.affectedRows === 0) {
+                    throw { message: `Cannot reverse restock for item ${row.itemId}: stock already sold.`, status: 400 };
+                }
+            }
+        }
+
+        // 3. Delete the transaction rows
+        const [delRes] = await connection.query(
+            "DELETE FROM transactions WHERE transactionId = ? AND clientId = ?",
+            [transactionId, clientId]
+        );
+
+        // 4. Free the idempotency key (0 rows is fine — old transactions predate the table)
+        await connection.query(
+            "DELETE FROM transaction_batches WHERE refId = ? AND clientId = ?",
+            [transactionId, clientId]
+        );
+
+        await connection.commit();
+
+        return { affectedRows: delRes.affectedRows, status: 200 };
     } catch (err) {
+        if (connection) await connection.rollback();
         logger.error(`Model Error (deleteById): ${err.message}`);
-        throw { message: err.sqlMessage, status: 500 };
+        throw { message: err.sqlMessage || err.message, status: err.status || 500 };
+    } finally {
+        if (connection) connection.release();
     }
 };
 
@@ -224,7 +316,7 @@ Transactions.deleteItemById = async (id, clientId) => {
 
         // 1. Fetch the transaction details first (to know what to undo)
         const [rows] = await connection.query(
-            "SELECT itemId, qty, action FROM transactions WHERE id = ? AND clientId = ?",
+            "SELECT transactionId, itemId, qty, action FROM transactions WHERE id = ? AND clientId = ?",
             [id, clientId]
         );
 
@@ -233,7 +325,7 @@ Transactions.deleteItemById = async (id, clientId) => {
             return { message: "Item log not found or access denied", status: 404, affectedRows: 0 };
         }
 
-        const { itemId, qty, action } = rows[0];
+        const { transactionId, itemId, qty, action } = rows[0];
 
         // 2. Determine Reverse Operator (Undo Logic)
         // If action was 'out' (Sale), we ADD stock back (+)
@@ -243,17 +335,41 @@ Transactions.deleteItemById = async (id, clientId) => {
         logger.debug(`Model: Undoing TRX item ${id} (${action} ${qty}). Adjusting Inventory ${itemId} by ${operator}${qty}`);
 
         // 3. Update Inventory
-        // We use the determined operator to reverse the stock change
-        await connection.query(
-            `UPDATE inventory SET qty = qty ${operator} ? WHERE id = ? AND clientId = ?`,
-            [qty, itemId, clientId]
-        );
+        // We use the determined operator to reverse the stock change.
+        // Reversing a restock (-) is guarded so stock can never go negative.
+        if (operator === '-') {
+            const [updRes] = await connection.query(
+                `UPDATE inventory SET qty = qty - ? WHERE id = ? AND clientId = ? AND qty >= ?`,
+                [qty, itemId, clientId, qty]
+            );
+            if (updRes.affectedRows === 0) {
+                throw { message: `Cannot reverse restock for item ${itemId}: stock already sold.`, status: 400 };
+            }
+        } else {
+            await connection.query(
+                `UPDATE inventory SET qty = qty + ? WHERE id = ? AND clientId = ?`,
+                [qty, itemId, clientId]
+            );
+        }
 
         // 4. Delete the Transaction Record
         const [delRes] = await connection.query(
             "DELETE FROM transactions WHERE id = ? AND clientId = ?",
             [id, clientId]
         );
+
+        // 5. If that was the last row of the group, free the idempotency key
+        // (0 rows is fine — old transactions predate the table)
+        const [[{ remaining }]] = await connection.query(
+            "SELECT COUNT(*) AS remaining FROM transactions WHERE transactionId = ? AND clientId = ?",
+            [transactionId, clientId]
+        );
+        if (remaining === 0) {
+            await connection.query(
+                "DELETE FROM transaction_batches WHERE refId = ? AND clientId = ?",
+                [transactionId, clientId]
+            );
+        }
 
         await connection.commit();
 
@@ -266,7 +382,7 @@ Transactions.deleteItemById = async (id, clientId) => {
     } catch (err) {
         if (connection) await connection.rollback();
         logger.error(`Model Error (deleteItemById): ${err.message}`);
-        throw { message: err.sqlMessage || err.message, status: 500 };
+        throw { message: err.sqlMessage || err.message, status: err.status || 500 };
     } finally {
         if (connection) connection.release();
     }

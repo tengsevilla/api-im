@@ -77,34 +77,6 @@ export const update = async (req, res) => {
     }
 };
 
-export const updateQty = async (req, res) => {
-    const clientId = getClientId(req);
-    const { id, operator: rawOperator, qty } = req.body;
-    const operator = (rawOperator === 'plus') ? "+" : "-";
-
-    logger.debug(`Controller: Adjusting qty for item ${id} (clientId: ${clientId})`);
-
-    try {
-        const result = await Inventory.updateQty(id, { qty }, operator, clientId);
-        sendResponse(res, result.status || 200, result.data, result.message);
-    } catch (err) {
-        logger.error(`Controller: updateQty Error - ${err.message}`);
-        sendResponse(res, 500, null, "Internal server error");
-    }
-};
-
-export const createHistory = async (req, res) => {
-    const clientId = getClientId(req);
-    try {
-        const historyData = { ...req.body, clientId: clientId };
-        const result = await Inventory.createHistory(historyData, clientId);
-        sendResponse(res, result.status || 200, result.data, result.message);
-    } catch (err) {
-        logger.error(`Controller: createHistory Error - ${err.message}`);
-        sendResponse(res, 500, null, "Internal server error");
-    }
-};
-
 export const getItemActivity = async (req, res) => {
     const clientId = getClientId(req);
 

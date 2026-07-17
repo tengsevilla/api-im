@@ -20,14 +20,6 @@ router.get("/display", inventory.getAllForDisplay);
 // Final path: PUT /api/inventory
 router.put("/", authenticateToken, inventory.update);
 
-// Update quantity only
-// Final path: PUT /api/inventory/updateqty
-router.put("/updateqty", authenticateToken, inventory.updateQty);
-
-// Create history entry
-// Final path: POST /api/inventory/history
-router.post("/history", authenticateToken, inventory.createHistory);
-
 // Retrieve inventory history
 // Final path: GET /api/inventory/activity
 router.get("/activity", authenticateToken, inventory.getItemActivity);

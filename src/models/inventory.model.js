@@ -66,22 +66,40 @@ Inventory.getAllForDisplay = async (clientId) => {
 };
 
 // Update: Wrapped result in 'data'
+// Snapshots the current row into inventoryhistory before applying the update — one transaction
 Inventory.update = async (id, data, clientId) => {
+    let connection;
     try {
         logger.debug(`Model: Updating item ${id} for client: ${clientId}`);
+        connection = await sql.getConnection();
+        await connection.beginTransaction();
+
+        // 1. Read the current version (locked for the duration of the transaction)
+        const [rows] = await connection.query(
+            "SELECT id, type, itemName, itemType, qty, sell, srp, tags, clientId FROM inventory WHERE id = ? AND clientId = ? FOR UPDATE",
+            [id, clientId]
+        );
+
+        if (rows.length === 0) {
+            await connection.rollback();
+            return { message: "Item not found or access denied", status: 200, data: null };
+        }
+
+        // 2. Snapshot it into history (date_created defaults to NOW())
+        await connection.query("INSERT INTO inventoryhistory SET ?", [rows[0]]);
+
+        // 3. Apply the update
         const query = `
-            UPDATE inventory 
-            SET type = ?, itemName = ?, itemType = ?, sell = ?, srp = ?, tags = ? 
+            UPDATE inventory
+            SET type = ?, itemName = ?, itemType = ?, sell = ?, srp = ?, tags = ?
             WHERE id = ? AND clientId = ?`;
 
-        const [res] = await sql.query(query, [
+        await connection.query(query, [
             data.type, data.itemName, data.itemType,
             data.sell, data.srp, data.tags, id, clientId
         ]);
 
-        if (res.affectedRows === 0) {
-            return { message: "Item not found or access denied", status: 200, data: null };
-        }
+        await connection.commit();
 
         // ✅ FIX: Consistent structure
         return {
@@ -89,31 +107,11 @@ Inventory.update = async (id, data, clientId) => {
             data: { id, ...data }
         };
     } catch (err) {
+        if (connection) await connection.rollback();
         logger.error(`Model Error (update): ${err.message}`);
-        throw { message: err.sqlMessage, status: 500 };
-    }
-};
-
-// UpdateQty: Wrapped result in 'data'
-Inventory.updateQty = async (id, data, operator, clientId) => {
-    try {
-        logger.debug(`Model: Adjusting qty for item ${id} (client: ${clientId})`);
-
-        const query = `UPDATE inventory SET qty = qty ${operator} ? WHERE id = ? AND clientId = ?`;
-        const [res] = await sql.query(query, [data.qty, id, clientId]);
-
-        if (res.affectedRows === 0) {
-            return { message: "Item not found or access denied", status: 200, data: null };
-        }
-
-        // ✅ FIX: Consistent structure
-        return {
-            status: 200,
-            data: { id, ...data }
-        };
-    } catch (err) {
-        logger.error(`Model Error (updateQty): ${err.message}`);
-        throw { message: err.sqlMessage, status: 500 };
+        throw { message: err.sqlMessage || err.message, status: 500 };
+    } finally {
+        if (connection) connection.release();
     }
 };
 
